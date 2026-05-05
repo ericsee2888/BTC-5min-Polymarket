@@ -269,10 +269,22 @@ class LiveClobClient:
 
         try:
             signature_type = int(self.config["POLYMARKET_SIGNATURE_TYPE"])
-            creds = ApiCreds(
-                api_key=self.config["POLYMARKET_API_KEY"],
-                api_secret=self.config["POLYMARKET_API_SECRET"],
-                api_passphrase=self.config["POLYMARKET_API_PASSPHRASE"],
+            has_l2_creds = all(
+                self.config.get(key)
+                for key in [
+                    "POLYMARKET_API_KEY",
+                    "POLYMARKET_API_SECRET",
+                    "POLYMARKET_API_PASSPHRASE",
+                ]
+            )
+            creds = (
+                ApiCreds(
+                    api_key=self.config["POLYMARKET_API_KEY"],
+                    api_secret=self.config["POLYMARKET_API_SECRET"],
+                    api_passphrase=self.config["POLYMARKET_API_PASSPHRASE"],
+                )
+                if has_l2_creds
+                else None
             )
             self.client = ClobClient(
                 HOST,
@@ -282,6 +294,11 @@ class LiveClobClient:
                 signature_type=signature_type,
                 funder=self.config.get("POLYMARKET_FUNDER_ADDRESS") or None,
             )
+            if creds is None:
+                self.client.set_api_creds(self.client.create_or_derive_api_creds())
+                self.config["_CLOB_CREDS_SOURCE"] = "derived_from_private_key"
+            else:
+                self.config["_CLOB_CREDS_SOURCE"] = "provided_env"
         except Exception as exc:  # noqa: BLE001
             self.sdk_error = f"py_clob_client_initialize_failed: {type(exc).__name__}: {exc}"
             raise RuntimeError(self.sdk_error) from None
@@ -434,14 +451,18 @@ def validate_mode(args: argparse.Namespace) -> str:
 def validate_config(config: dict[str, str], mode: str) -> list[str]:
     required = [
         "POLYMARKET_PRIVATE_KEY",
-        "POLYMARKET_API_KEY",
-        "POLYMARKET_API_SECRET",
-        "POLYMARKET_API_PASSPHRASE",
         "POLYMARKET_SIGNATURE_TYPE",
     ]
     if mode in {"live", "preflight"}:
         required.append("POLYMARKET_FUNDER_ADDRESS")
     missing = [key for key in required if not config.get(key)]
+    l2_values = [
+        bool(config.get("POLYMARKET_API_KEY")),
+        bool(config.get("POLYMARKET_API_SECRET")),
+        bool(config.get("POLYMARKET_API_PASSPHRASE")),
+    ]
+    if any(l2_values) and not all(l2_values):
+        missing.append("POLYMARKET_API_KEY_SECRET_PASSPHRASE_COMPLETE_OR_EMPTY")
     try:
         int(config.get("POLYMARKET_SIGNATURE_TYPE") or "")
     except ValueError:
@@ -483,6 +504,36 @@ def find_numeric_by_keys(payload: Any, keys: set[str]) -> float | None:
             if found is not None:
                 return found
     return None
+
+
+def find_max_numeric_in_payload(payload: Any) -> float | None:
+    values: list[float] = []
+    if isinstance(payload, dict):
+        for value in payload.values():
+            parsed = parse_numeric(value)
+            if parsed is not None:
+                values.append(parsed)
+            nested = find_max_numeric_in_payload(value)
+            if nested is not None:
+                values.append(nested)
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = find_max_numeric_in_payload(item)
+            if nested is not None:
+                values.append(nested)
+    else:
+        parsed = parse_numeric(payload)
+        if parsed is not None:
+            values.append(parsed)
+    return max(values) if values else None
+
+
+def extract_collateral_balance_and_allowance(response: Any) -> tuple[float | None, float | None]:
+    balance = find_numeric_by_keys(response, {"balance", "usdc", "collateral"})
+    allowance = find_numeric_by_keys(response, {"allowance"})
+    if allowance is None and isinstance(response, dict):
+        allowance = find_max_numeric_in_payload(response.get("allowances"))
+    return balance, allowance
 
 
 def normalize_list_response(response: Any) -> list[Any]:
@@ -594,8 +645,7 @@ def run_account_preflight(
     btc_positions = [item for item in user_positions if is_btc_5m_position(item)]
     unknown_btc_positions = [item for item in btc_positions if not position_matches_bot_key(item, positions)]
     open_orders = normalize_list_response(open_orders_probe.get("response"))
-    balance = find_numeric_by_keys(collateral_probe.get("response"), {"balance", "usdc", "collateral"})
-    allowance = find_numeric_by_keys(collateral_probe.get("response"), {"allowance"})
+    balance, allowance = extract_collateral_balance_and_allowance(collateral_probe.get("response"))
     errors: list[str] = []
     if not collateral_probe.get("ok"):
         errors.append(f"collateral_probe_failed: {collateral_probe.get('error')}")
@@ -845,6 +895,7 @@ async def trade_loop(args: argparse.Namespace, mode: str, config: dict[str, str]
                 "api_key": mask_secret(config.get("POLYMARKET_API_KEY", "")),
                 "funder": mask_secret(config.get("POLYMARKET_FUNDER_ADDRESS", "")),
                 "signature_type": config.get("POLYMARKET_SIGNATURE_TYPE", ""),
+                "clob_creds_source": config.get("_CLOB_CREDS_SOURCE", "not_initialized"),
             },
             "account_preflight": preflight_result,
         },

@@ -47,11 +47,13 @@
 
 ```bash
 POLYMARKET_PRIVATE_KEY=
+POLYMARKET_FUNDER_ADDRESS=
+POLYMARKET_SIGNATURE_TYPE=
+
+# Optional. 三项都留空时，官方 CLOB SDK 会用私钥自动派生。
 POLYMARKET_API_KEY=
 POLYMARKET_API_SECRET=
 POLYMARKET_API_PASSPHRASE=
-POLYMARKET_FUNDER_ADDRESS=
-POLYMARKET_SIGNATURE_TYPE=
 ```
 
 注意：
@@ -59,6 +61,8 @@ POLYMARKET_SIGNATURE_TYPE=
 - 不要把真实私钥写进代码；
 - 不要把真实 `.env` 提交到 Git；
 - `POLYMARKET_FUNDER_ADDRESS` 和 `POLYMARKET_SIGNATURE_TYPE` 必须和现有 Polymarket 账户结构一致；
+- `POLYMARKET_API_KEY / SECRET / PASSPHRASE` 三件套可以留空，脚本会通过官方 CLOB SDK 自动派生；
+- 如果要手动填写 CLOB 三件套，必须三项都填完整，不能只填一个地址；
 - 当前本机已经安装官方 `py_clob_client`，但 live 前仍必须用真实账户做一次账户预检。
 
 ## 4. Dry-run 示例
