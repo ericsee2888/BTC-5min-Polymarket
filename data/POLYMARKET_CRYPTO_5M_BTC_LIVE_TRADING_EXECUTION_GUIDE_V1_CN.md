@@ -8,11 +8,11 @@
 
 第一版只跑：
 
-- 策略：`thr25_start60_cap0.75_cash50_lat250ms`
+- 策略：`thr25_start60_cap0.75_cash100_lat250ms`
 - 阈值：BTC 现货相对 `price_to_beat` 偏离 `$25`
 - 入场窗口：开盘后 `60-180秒`
 - 入场价格上限：`0.75`
-- 单笔金额：`50 USDC`
+- 单笔金额：`100 USDC`
 - 延迟模拟：信号触发后等待 `250ms`
 - 订单类型：`FOK`，必须完整成交，否则取消
 - 持仓方式：持有到结算
@@ -126,10 +126,10 @@ python scripts/trade_polymarket_crypto_5m_btc_live_v1.py \
 
 默认风控：
 
-- 单笔金额：`50 USDC`
+- 单笔金额：`100 USDC`
 - 最大未结算占用：`500 USDC`
 - 最大日亏损：`600 USDC`
-- 连续真实下单失败：`3次` 停机
+- 连续严重系统错误：`20次` 停机
 - 最大盘口年龄：`1500ms`
 - 价格源最大年龄：`3000ms`
 - `price_to_beat` 必须在开盘前 `5秒` 内捕获，否则该市场不交易
@@ -137,12 +137,18 @@ python scripts/trade_polymarket_crypto_5m_btc_live_v1.py \
 可以通过命令行覆盖：
 
 ```bash
---order-cash-usdc 50
+--order-cash-usdc 100
 --max-locked-usdc 500
 --max-daily-loss-usdc 600
---max-consecutive-failures 3
+--max-consecutive-critical-errors 20
 --max-price-to-beat-observed-second 5
 ```
+
+说明：
+
+- FOK 未成交、250ms 后价格跑掉、盘口深度不足，都是正常跳过，不会触发停机。
+- 偶发网络/API 抖动只记录为 transient error，不会因为几次失败就停止策略。
+- 只有签名、授权、余额、funder、未知订单/仓位等严重系统问题持续出现，才会触发停机。
 
 ## 8. 输出文件
 

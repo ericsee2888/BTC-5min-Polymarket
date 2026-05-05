@@ -73,13 +73,13 @@ THRESHOLD_USD = 25.0
 ENTRY_START_SECOND = 60.0
 ENTRY_END_SECOND = 180.0
 ENTRY_CAP = 0.75
-ORDER_CASH_USDC = 50.0
+ORDER_CASH_USDC = 100.0
 ENTRY_LATENCY_MS = 250
-STRATEGY_ID = "thr25_start60_cap0.75_cash50_lat250ms"
+STRATEGY_ID = "thr25_start60_cap0.75_cash100_lat250ms"
 
 MAX_LOCKED_USDC = 500.0
 MAX_DAILY_LOSS_USDC = 600.0
-MAX_CONSECUTIVE_ORDER_FAILURES = 3
+MAX_CONSECUTIVE_CRITICAL_ERRORS = 20
 MAX_BOOK_AGE_MS = 1500
 MAX_PRICE_SOURCE_AGE_MS = 3000
 DEFAULT_USDC_BALANCE_FLOOR = 50.0
@@ -122,6 +122,7 @@ ORDER_FIELDS = [
     "confirm_success",
     "confirm_json",
     "critical_uncertain",
+    "failure_class",
 ]
 
 SETTLEMENT_FIELDS = [
@@ -784,6 +785,22 @@ def response_order_id(response: dict[str, Any]) -> str:
     return ""
 
 
+def response_failure_class(response: dict[str, Any], error: str) -> str:
+    if error:
+        lowered = error.lower()
+        fatal_markers = ["signature", "auth", "unauthorized", "allowance", "balance", "funder", "invalid api"]
+        if any(marker in lowered for marker in fatal_markers):
+            return "critical_system_error"
+        return "transient_system_error"
+    if response_success(response):
+        return ""
+    text = json.dumps(response, ensure_ascii=False).lower()
+    no_fill_markers = ["not filled", "unfilled", "not enough", "insufficient liquidity", "fok", "cancel", "canceled"]
+    if any(marker in text for marker in no_fill_markers):
+        return "normal_no_fill"
+    return "normal_no_fill"
+
+
 def count_existing_lines(path: Path) -> int:
     if not path.exists():
         return 0
@@ -831,6 +848,9 @@ def write_report(
 | 下单尝试数 | {counters.get("order_attempts", 0)} |
 | 成功成交数 | {counters.get("orders_success", 0)} |
 | 失败下单数 | {counters.get("orders_failed", 0)} |
+| 正常未成交数 | {counters.get("normal_no_fill", 0)} |
+| 临时系统错误数 | {counters.get("transient_system_errors", 0)} |
+| 严重系统错误数 | {counters.get("critical_system_errors", 0)} |
 | 风控跳过数 | {counters.get("risk_skips", 0)} |
 | 结算记录数 | {counters.get("settlements", 0)} |
 | 预估已实现盈亏 | {round(float(counters.get("expected_realized_pnl", 0.0)), 6)} |
@@ -863,13 +883,16 @@ async def trade_loop(args: argparse.Namespace, mode: str, config: dict[str, str]
         "order_attempts": 0,
         "orders_success": 0,
         "orders_failed": 0,
+        "normal_no_fill": 0,
+        "transient_system_errors": 0,
+        "critical_system_errors": 0,
         "risk_skips": 0,
         "settlements": 0,
         "expected_realized_pnl": 0.0,
         "restored_open_positions": len(positions),
     }
     stop_reason = "duration_complete"
-    consecutive_failures = 0
+    consecutive_critical_errors = 0
     locked_cash = restored_locked_cash
     attempted_pending: set[str] = set()
     pending_orders: dict[str, PendingLiveOrder] = {}
@@ -950,17 +973,17 @@ async def trade_loop(args: argparse.Namespace, mode: str, config: dict[str, str]
                         pending_orders,
                         positions,
                         counters,
-                        consecutive_failures_ref={"value": consecutive_failures},
+                        consecutive_failures_ref={"value": consecutive_critical_errors},
                         locked_cash_ref={"value": locked_cash},
                         start_mono=start_mono,
                     )
-                    consecutive_failures = int(counters.get("_consecutive_failures", 0))
+                    consecutive_critical_errors = int(counters.get("_consecutive_failures", 0))
                     locked_cash = float(counters.get("_locked_cash", locked_cash))
                     if counters.get("_critical_stop_reason"):
                         stop_reason = str(counters["_critical_stop_reason"])
                         break
-                    if consecutive_failures >= args.max_consecutive_failures:
-                        stop_reason = "max_consecutive_order_failures"
+                    if consecutive_critical_errors >= args.max_consecutive_critical_errors:
+                        stop_reason = "max_consecutive_critical_errors"
                         break
                     if float(counters.get("expected_realized_pnl", 0.0)) <= -args.max_daily_loss_usdc:
                         stop_reason = "max_daily_loss"
@@ -1087,7 +1110,7 @@ async def stream_once(
                 counters["_locked_cash"] = locked_cash_ref["value"]
                 if counters.get("_critical_stop_reason"):
                     break
-                if consecutive_failures_ref["value"] >= args.max_consecutive_failures:
+                if consecutive_failures_ref["value"] >= args.max_consecutive_critical_errors:
                     break
                 if float(counters.get("expected_realized_pnl", 0.0)) <= -args.max_daily_loss_usdc:
                     break
@@ -1269,6 +1292,7 @@ def process_live_once(
         confirm_result = clob.confirm_order_fill(order_id, pending.token_id) if success else {}
         confirm_success = bool(confirm_result.get("ok")) if success else False
         critical_uncertain = bool(success and mode == "live" and not confirm_success)
+        failure_class = "" if success else response_failure_class(response, error)
         row = {
             **base_row,
             "event_time_utc": iso_now(),
@@ -1285,6 +1309,7 @@ def process_live_once(
             "confirm_success": confirm_success,
             "confirm_json": json.dumps(confirm_result, ensure_ascii=False),
             "critical_uncertain": critical_uncertain,
+            "failure_class": failure_class,
         }
         append_csv(args.orders_csv, ORDER_FIELDS, row)
         append_audit(args.audit_jsonl, "order_result", row)
@@ -1310,10 +1335,21 @@ def process_live_once(
             )
             save_state(args.state_json, positions)
             if critical_uncertain:
-                counters["_critical_stop_reason"] = "order_fill_confirmation_uncertain"
+                counters["critical_system_errors"] = int(counters.get("critical_system_errors", 0)) + 1
+                consecutive_failures_ref["value"] += 1
+                append_audit(args.audit_jsonl, "order_confirmation_uncertain", row)
         else:
             counters["orders_failed"] = int(counters.get("orders_failed", 0)) + 1
-            consecutive_failures_ref["value"] += 1
+            if failure_class == "normal_no_fill":
+                counters["normal_no_fill"] = int(counters.get("normal_no_fill", 0)) + 1
+                consecutive_failures_ref["value"] = 0
+            elif failure_class == "transient_system_error":
+                counters["transient_system_errors"] = int(counters.get("transient_system_errors", 0)) + 1
+                append_audit(args.audit_jsonl, "transient_order_error", row)
+            else:
+                counters["critical_system_errors"] = int(counters.get("critical_system_errors", 0)) + 1
+                consecutive_failures_ref["value"] += 1
+                append_audit(args.audit_jsonl, "critical_order_error", row)
 
     for key, position in list(positions.items()):
         if position.cash_released_utc or now_ms < position.end_time_ms + args.settlement_grace_seconds * 1000:
@@ -1408,7 +1444,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--entry-latency-ms", type=int, default=ENTRY_LATENCY_MS)
     parser.add_argument("--max-locked-usdc", type=float, default=MAX_LOCKED_USDC)
     parser.add_argument("--max-daily-loss-usdc", type=float, default=MAX_DAILY_LOSS_USDC)
-    parser.add_argument("--max-consecutive-failures", type=int, default=MAX_CONSECUTIVE_ORDER_FAILURES)
+    parser.add_argument("--max-consecutive-critical-errors", type=int, default=MAX_CONSECUTIVE_CRITICAL_ERRORS)
     parser.add_argument("--max-book-age-ms", type=int, default=MAX_BOOK_AGE_MS)
     parser.add_argument("--max-price-to-beat-observed-second", type=float, default=5.0)
     parser.add_argument("--settlement-grace-seconds", type=float, default=15.0)

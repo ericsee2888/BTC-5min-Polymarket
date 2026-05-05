@@ -44,13 +44,13 @@ Recommended order before live trading:
 
 ## Current Main Strategy
 
-`thr25_start60_cap0.75_cash50_lat250ms`
+`thr25_start60_cap0.75_cash100_lat250ms`
 
 - BTC spot deviation threshold: `25 USD`
 - Entry window: `60-180s` after market open
 - Entry cap: `0.75`
-- Order size: `50 USDC`
+- Order size: `100 USDC`
 - Execution: FOK buy only
 - Position handling: hold to settlement
-- Risk defaults: `500 USDC` max unsettled capital, `300 USDC` daily loss stop
+- Risk defaults: `500 USDC` max unsettled capital, `600 USDC` daily loss stop
 
