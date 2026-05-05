@@ -128,7 +128,7 @@ python scripts/trade_polymarket_crypto_5m_btc_live_v1.py \
 
 - 单笔金额：`50 USDC`
 - 最大未结算占用：`500 USDC`
-- 最大日亏损：`300 USDC`
+- 最大日亏损：`600 USDC`
 - 连续真实下单失败：`3次` 停机
 - 最大盘口年龄：`1500ms`
 - 价格源最大年龄：`3000ms`
@@ -139,7 +139,7 @@ python scripts/trade_polymarket_crypto_5m_btc_live_v1.py \
 ```bash
 --order-cash-usdc 50
 --max-locked-usdc 500
---max-daily-loss-usdc 300
+--max-daily-loss-usdc 600
 --max-consecutive-failures 3
 --max-price-to-beat-observed-second 5
 ```
